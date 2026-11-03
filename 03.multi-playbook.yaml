@@ -1,0 +1,21 @@
+- name: playbook 01
+  hosts: local
+  connection: local
+  tasks:
+    - name: task1 from playbook1
+      debug:
+        msg: "Task1 from play 01"
+    - name: task2 from playbook1
+      debug:
+        msg: "task2 from playbook1"
+- name: playbook2
+  hosts: local
+  connection: local
+  tasks:
+     - name: task1 from playbook2
+       debug:
+          msg: "Task1 from play 02"
+     - name: task2 from playbook2
+       debug:
+         msg: "task2 from playbook2"
+     
