@@ -1,8 +1,7 @@
 -name: demo on debug
  host:local
  connection:local
-
  tasks:
  -name: print hello world
- ansible.buitin.debug:
+ debug:
   msg:"Hello Ansible!!" 
