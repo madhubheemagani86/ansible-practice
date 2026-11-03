@@ -1,0 +1,10 @@
+- name: multi tasks
+  hosts: local
+  connection: local
+  tasks: 
+    - name: task1 
+      debug: 
+        msg: "task1"
+    - name: task2
+      debug:
+        msg: "task2"
