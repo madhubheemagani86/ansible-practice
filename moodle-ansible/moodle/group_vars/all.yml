@@ -15,7 +15,8 @@ php_stream: "8.3"
 
 # MySQL 8.4 LTS (Oracle's RHEL 9 repo package - the RHEL equivalent of mysql-apt-config)
 mysql_repo_rpm: "mysql84-community-release-el9-4.noarch.rpm"
-mysql_repo_url: "https://dev.mysql.com/get/mysql84-community-release-el9-4.noarch.rpm"
+mysql_repo_url: "https://repo.mysql.com/mysql84-community-release-el9-4.noarch.rpm"
+mysql_repo_url_fallback: "https://dev.mysql.com/get/mysql84-community-release-el9-4.noarch.rpm"
 mysql_root_password: "Root@12345"   # CHANGE THIS - saved to /root/.my.cnf
 db_name: "moodle"
 db_user: "moodleuser"

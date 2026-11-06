@@ -83,11 +83,21 @@
       register: mysql_module
       changed_when: "'changed' in mysql_module.stdout"
 
-    - name: Download the MySQL 8.4 repo package (wget)
-      ansible.builtin.get_url:
-        url: "{{ mysql_repo_url }}"
-        dest: "/tmp/{{ mysql_repo_rpm }}"
-        mode: "0644"
+    - name: Download the MySQL 8.4 repo package
+      block:
+        # dev.mysql.com answers 403 to Ansible's default (Python) user agent,
+        # so use repo.mysql.com and a wget user agent.
+        - name: Download from repo.mysql.com
+          ansible.builtin.get_url:
+            url: "{{ mysql_repo_url }}"
+            dest: "/tmp/{{ mysql_repo_rpm }}"
+            mode: "0644"
+            http_agent: "Wget/1.21.1"
+      rescue:
+        - name: Fallback - download from dev.mysql.com with wget
+          ansible.builtin.command: wget -q -O /tmp/{{ mysql_repo_rpm }} {{ mysql_repo_url_fallback }}  # noqa: command-instead-of-module
+          args:
+            creates: "/tmp/{{ mysql_repo_rpm }}"
 
     - name: Verify it is a real RPM (not an HTML error page)
       ansible.builtin.command: file /tmp/{{ mysql_repo_rpm }}
@@ -95,9 +105,16 @@
       changed_when: false
       failed_when: "'RPM' not in rpm_type.stdout"
 
+    - name: Download MySQL GPG key
+      ansible.builtin.get_url:
+        url: https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+        dest: /tmp/RPM-GPG-KEY-mysql-2023
+        mode: "0644"
+        http_agent: "Wget/1.21.1"
+
     - name: Import MySQL GPG key
       ansible.builtin.rpm_key:
-        key: https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+        key: /tmp/RPM-GPG-KEY-mysql-2023
         state: present
 
     - name: Install the MySQL repo package
