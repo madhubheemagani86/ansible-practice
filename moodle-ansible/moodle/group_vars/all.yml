@@ -11,6 +11,7 @@ moodle_repo: "https://github.com/moodle/moodle.git"
 moodle_branch: "MOODLE_503_STABLE"
 moodle_dir: "/var/www/html/moodle"
 moodle_data: "/var/moodledata"
+web_user: "apache"               # Apache/php-fpm user on Amazon Linux
 
 # Database
 mysql_private_ip: "172.31.18.233"
@@ -19,6 +20,7 @@ db_name: "moodle"
 db_user: "moodleuser"
 db_password: "moodle@123"        # encrypt with ansible-vault for anything beyond dev
 db_allowed_host: "%"             # tighten to the web server's private IP if you know it
+mysql_root_password: "Root@12345"   # CHANGE THIS - saved to /root/.my.cnf on the DB server
 
 # Moodle site install (CLI). Set moodle_auto_install: false to finish in the browser instead.
 moodle_auto_install: true
