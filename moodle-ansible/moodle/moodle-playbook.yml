@@ -9,7 +9,7 @@
 #   moodle-playbook.yml
 #
 # Control node:
-#   ansible-galaxy collection install community.mysql community.general
+#   ansible-galaxy collection install community.mysql
 # Run:
 #   ansible-playbook -i inventory.ini moodle-playbook.yml
 
@@ -23,19 +23,32 @@
   tasks:
     - name: Install prerequisites
       ansible.builtin.apt:
-        name: [gnupg, curl, ca-certificates, python3-pymysql, python3-debian]
+        name: [gnupg, curl, ca-certificates, python3-pymysql]
         state: present
         update_cache: true
 
+    - name: Ensure APT keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download MySQL APT signing key
+      ansible.builtin.get_url:
+        url: https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+        dest: /etc/apt/keyrings/mysql.asc
+        mode: "0644"
+
     - name: Add MySQL 8.4 LTS repository (official repo.mysql.com)
-      ansible.builtin.deb822_repository:
-        name: mysql-8.4-lts
-        types: [deb]
-        uris: http://repo.mysql.com/apt/ubuntu
-        suites: ["{{ ansible_facts['distribution_release'] }}"]
-        components: [mysql-8.4-lts]
-        signed_by: https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
-        state: present
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/mysql-8.4-lts.sources
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: http://repo.mysql.com/apt/ubuntu
+          Suites: {{ ansible_facts['distribution_release'] }}
+          Components: mysql-8.4-lts
+          Signed-By: /etc/apt/keyrings/mysql.asc
 
     - name: Install MySQL server 8.4
       ansible.builtin.apt:
@@ -168,10 +181,14 @@
       changed_when: false
 
     - name: Mark Moodle directory as a safe git directory (repo is owned by www-data)
-      community.general.git_config:
-        name: safe.directory
-        value: "{{ moodle_dir }}"
-        scope: system
+      ansible.builtin.blockinfile:
+        path: /etc/gitconfig
+        create: true
+        mode: "0644"
+        marker: "# {mark} ANSIBLE MANAGED - moodle safe.directory"
+        block: |
+          [safe]
+          	directory = {{ moodle_dir }}
 
     - name: Clone Moodle 5.3 into /var/www/html/moodle
       ansible.builtin.git:
@@ -258,9 +275,9 @@
       notify: Restart apache
 
     - name: Enable Apache modules
-      community.general.apache2_module:
-        name: "{{ item }}"
-        state: present
+      ansible.builtin.command: a2enmod {{ item }}
+      args:
+        creates: /etc/apache2/mods-enabled/{{ item }}.load
       loop: [rewrite, php8.3]
       notify: Restart apache
 
