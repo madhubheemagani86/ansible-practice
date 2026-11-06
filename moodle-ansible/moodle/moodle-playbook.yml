@@ -1,12 +1,12 @@
 ---
-# Moodle 5.3 on Amazon Linux 2023 or RHEL 9 family (RHEL / Rocky / Alma / CentOS Stream 9)
-#   DB  : MySQL 8.4 LTS  -> 54.160.140.250 (private 172.31.18.233)
-#   WEB : httpd + php-fpm 8.3 + Moodle 5.3 -> 107.22.85.229 (dev.moodle.lmsconsultant.shop)
+# Moodle 5.0 on a single RHEL 9 server (Redhat-9-DevOps-Practice AMI)
+#   nginx + PHP 8.3 (php-fpm) + MySQL 8.4 LTS + Moodle 5.0
+#   Site: http://dev.moodle.lmsconsultant.shop
 #
 # Layout:
 #   ansible.cfg
 #   inventory.ini
-#   group_vars/all.yml      <- all settings (URL, repo, DB credentials, admin login)
+#   group_vars/all.yml      <- all settings
 #   moodle-playbook.yml
 #
 # Control node:
@@ -14,60 +14,52 @@
 # Run (from this folder):
 #   ansible-playbook moodle-playbook.yml
 
-# ---------------------------------------------------------------------------
-# COMMON: OS detection, SELinux tools, firewalld
-# ---------------------------------------------------------------------------
-- name: Common preparation
+- name: Moodle 5.0 on nginx + PHP 8.3 + MySQL 8.4 (RHEL 9)
   hosts: moodle
-  become: true
-
-  tasks:
-    - name: Work out which supported OS this is
-      ansible.builtin.set_fact:
-        is_amazon: "{{ ansible_facts['distribution'] == 'Amazon' and ansible_facts['distribution_major_version'] == '2023' }}"
-        is_el9: "{{ ansible_facts['distribution'] != 'Amazon' and ansible_facts['os_family'] == 'RedHat'
-                    and ansible_facts['distribution_major_version'] == '9' }}"
-        selinux_on: "{{ ansible_facts['selinux']['status'] | default('disabled') == 'enabled'
-                        and ansible_facts['selinux']['mode'] | default('') != 'disabled' }}"
-
-    - name: Stop on unsupported OS
-      ansible.builtin.assert:
-        that: is_amazon or is_el9
-        fail_msg: >-
-          Supported: Amazon Linux 2023 or RHEL 9 family. Found
-          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
-
-    - name: Show detected OS
-      ansible.builtin.debug:
-        msg: "{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}, SELinux {{ 'on' if selinux_on else 'off' }}"
-
-    - name: Install SELinux management tools
-      ansible.builtin.dnf:
-        name: [policycoreutils-python-utils]
-        state: present
-      when: selinux_on
-
-    - name: Gather service states (to see whether firewalld is running)
-      ansible.builtin.service_facts:
-
-    - name: Remember firewalld state
-      ansible.builtin.set_fact:
-        firewalld_on: "{{ ansible_facts['services']['firewalld.service']['state'] | default('') == 'running' }}"
-
-# ---------------------------------------------------------------------------
-# DATABASE SERVER
-# ---------------------------------------------------------------------------
-- name: Install and configure MySQL 8.4
-  hosts: db
   become: true
 
   vars:
     mysql_socket: /var/lib/mysql/mysql.sock
+    php_fpm_socket: /run/php-fpm/www.sock
+    php_packages:            # from the php:8.3 AppStream module
+      - php-fpm
+      - php-cli
+      - php-common
+      - php-mysqlnd
+      - php-pdo
+      - php-gd
+      - php-intl
+      - php-mbstring
+      - php-xml
+      - php-pecl-zip
+      - php-soap
+      - php-sodium
+      - php-bcmath
+      - php-opcache
+      - php-process
+      - php-ldap
 
   tasks:
-    - name: Install pip
+    # ----------------------------------------------------------------------
+    # Pre-checks
+    # ----------------------------------------------------------------------
+    - name: Confirm the OS is RHEL 9 family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'RedHat'
+          - ansible_facts['distribution'] != 'Amazon'
+          - ansible_facts['distribution_major_version'] == '9'
+        fail_msg: >-
+          This playbook needs RHEL 9 (or Rocky/Alma/CentOS Stream 9). Found
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+
+    - name: Remember whether SELinux is enforcing/permissive
+      ansible.builtin.set_fact:
+        selinux_on: "{{ ansible_facts['selinux']['status'] | default('disabled') == 'enabled' }}"
+
+    - name: Install base packages
       ansible.builtin.dnf:
-        name: [python3-pip]
+        name: [wget, file, git, unzip, tar, cronie, python3-pip, policycoreutils-python-utils]
         state: present
 
     - name: Install PyMySQL (needed by the community.mysql modules)
@@ -75,7 +67,13 @@
         name: PyMySQL
         executable: pip3
 
-    - name: Disable the distro MySQL module so MySQL 8.4 community packages are used (RHEL 9)
+    - name: Gather service states (to see whether firewalld is running)
+      ansible.builtin.service_facts:
+
+    # ----------------------------------------------------------------------
+    # MySQL 8.4 LTS (RHEL equivalent of the mysql-apt-config steps)
+    # ----------------------------------------------------------------------
+    - name: Disable RHEL's own MySQL module so the 8.4 community packages are used
       ansible.builtin.shell: |
         set -o pipefail
         if dnf -q module list --disabled mysql 2>/dev/null | grep -q '^mysql'; then exit 0; fi
@@ -84,30 +82,47 @@
         executable: /bin/bash
       register: mysql_module
       changed_when: "'changed' in mysql_module.stdout"
-      when: is_el9
+
+    - name: Download the MySQL 8.4 repo package (wget)
+      ansible.builtin.get_url:
+        url: "{{ mysql_repo_url }}"
+        dest: "/tmp/{{ mysql_repo_rpm }}"
+        mode: "0644"
+
+    - name: Verify it is a real RPM (not an HTML error page)
+      ansible.builtin.command: file /tmp/{{ mysql_repo_rpm }}
+      register: rpm_type
+      changed_when: false
+      failed_when: "'RPM' not in rpm_type.stdout"
 
     - name: Import MySQL GPG key
       ansible.builtin.rpm_key:
         key: https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
         state: present
 
-    - name: Add MySQL 8.4 LTS repository (el9 build)
+    - name: Install the MySQL repo package
       ansible.builtin.dnf:
-        name: https://dev.mysql.com/get/mysql84-community-release-el9-1.noarch.rpm
+        name: "/tmp/{{ mysql_repo_rpm }}"
         state: present
 
-    - name: Install MySQL server 8.4
+    - name: Check which MySQL server version dnf will install
+      ansible.builtin.command: dnf -q info --available mysql-community-server
+      register: mysql_available
+      changed_when: false
+      failed_when: "'8.4.' not in mysql_available.stdout"
+
+    - name: Install MySQL server and client 8.4
       ansible.builtin.dnf:
-        name: mysql-community-server
+        name: [mysql-community-server, mysql-community-client]
         state: present
 
-    - name: Configure MySQL for Moodle (listen on private IP only, utf8mb4)
+    - name: MySQL settings for Moodle (utf8mb4, local only)
       ansible.builtin.blockinfile:
         path: /etc/my.cnf
         insertafter: '^\[mysqld\]'
         marker: "# {mark} ANSIBLE MANAGED - moodle"
         block: |
-          bind-address           = {{ mysql_private_ip }}
+          bind-address           = 127.0.0.1
           character-set-server   = utf8mb4
           collation-server       = utf8mb4_unicode_ci
           innodb_file_per_table  = 1
@@ -121,7 +136,7 @@
       args:
         creates: /var/lib/mysql/mysql.ibd
 
-    - name: Fix SELinux labels on the new data directory
+    - name: Fix SELinux labels on the new MySQL data directory
       ansible.builtin.command: restorecon -R /var/lib/mysql
       register: mysql_restorecon
       changed_when: mysql_restorecon.stdout | length > 0
@@ -133,28 +148,14 @@
         state: started
         enabled: true
 
-    - name: Open port 3306 in firewalld
-      ansible.builtin.shell: |
-        firewall-cmd --query-port=3306/tcp --permanent >/dev/null && exit 0
-        firewall-cmd --add-port=3306/tcp --permanent && firewall-cmd --reload && echo changed
-      args:
-        executable: /bin/bash
-      register: fw_db
-      changed_when: "'changed' in fw_db.stdout"
-      when: firewalld_on
-
-    - name: Apply config changes now (bind-address must be live before the web tier connects)
+    - name: Apply MySQL config now
       ansible.builtin.meta: flush_handlers
 
-    - name: Read MySQL server version
+    - name: Assert MySQL 8.4 is running
       ansible.builtin.command: mysql --version
       register: mysql_version
       changed_when: false
-
-    - name: Assert MySQL is 8.4 (Moodle 5.3 minimum)
-      ansible.builtin.assert:
-        that: "' 8.4.' in mysql_version.stdout"
-        fail_msg: "Expected MySQL 8.4, got: {{ mysql_version.stdout }}"
+      failed_when: "' 8.4.' not in mysql_version.stdout"
 
     - name: Set MySQL root password (works on first run and re-runs)
       community.mysql.mysql_user:  # noqa: fqcn[canonical]
@@ -192,87 +193,38 @@
       community.mysql.mysql_user:  # noqa: fqcn[canonical]
         name: "{{ db_user }}"
         password: "{{ db_password }}"
-        host: "{{ db_allowed_host }}"
+        host: "{{ item }}"
         priv: "{{ db_name }}.*:ALL"
         state: present
         login_user: root
         login_password: "{{ mysql_root_password }}"
         login_unix_socket: "{{ mysql_socket }}"
+      loop: [localhost, 127.0.0.1]
       no_log: true
 
-  handlers:
-    - name: Restart mysqld
-      ansible.builtin.service:
-        name: mysqld
-        state: restarted
-
-# ---------------------------------------------------------------------------
-# WEB SERVER
-# ---------------------------------------------------------------------------
-- name: Install httpd, PHP 8.3 and Moodle 5.3
-  hosts: web
-  become: true
-
-  vars:
-    php_packages_amazon:
-      - php8.3
-      - php8.3-cli
-      - php8.3-common
-      - php8.3-fpm
-      - php8.3-mysqlnd
-      - php8.3-pdo
-      - php8.3-gd
-      - php8.3-intl
-      - php8.3-mbstring
-      - php8.3-xml
-      - php8.3-zip
-      - php8.3-soap
-      - php8.3-sodium
-      - php8.3-bcmath
-      - php8.3-opcache
-      - php8.3-process
-      - php8.3-ldap
-    php_packages_el9:        # from the php:8.3 AppStream module
-      - php
-      - php-cli
-      - php-common
-      - php-fpm
-      - php-mysqlnd
-      - php-pdo
-      - php-gd
-      - php-intl
-      - php-mbstring
-      - php-xml
-      - php-pecl-zip
-      - php-soap
-      - php-sodium
-      - php-bcmath
-      - php-opcache
-      - php-process
-      - php-ldap
-
-  tasks:
-    - name: Switch the PHP module stream to 8.3 (RHEL 9)
+    # ----------------------------------------------------------------------
+    # PHP 8.3 (php-fpm)
+    # ----------------------------------------------------------------------
+    - name: Switch the PHP module stream to 8.3
       ansible.builtin.shell: |
         set -o pipefail
-        if dnf -q module list --enabled php 2>/dev/null | grep -Eq '^php +8\.3'; then exit 0; fi
-        dnf -y module reset php && dnf -y module enable php:8.3 && echo changed
+        if dnf -q module list --enabled php 2>/dev/null | grep -Eq '^php +{{ php_stream }}'; then exit 0; fi
+        dnf -y module reset php && dnf -y module enable php:{{ php_stream }} && echo changed
       args:
         executable: /bin/bash
       register: php_module
       changed_when: "'changed' in php_module.stdout"
-      when: is_el9
 
-    - name: Install httpd, PHP 8.3 (php-fpm), extensions and tools
+    - name: Install PHP 8.3 and extensions
       ansible.builtin.dnf:
-        name: "{{ ['httpd', 'git', 'unzip', 'cronie'] + (php_packages_amazon if is_amazon else php_packages_el9) }}"
+        name: "{{ php_packages }}"
         state: present
 
     - name: Assert PHP is 8.3
       ansible.builtin.command: php -r 'echo PHP_VERSION;'
       register: php_version
       changed_when: false
-      failed_when: not php_version.stdout.startswith('8.3')
+      failed_when: not php_version.stdout.startswith(php_stream)
 
     - name: Moodle PHP settings (shared by php-fpm and CLI)
       ansible.builtin.copy:
@@ -301,6 +253,89 @@
         executable: /bin/bash
       changed_when: false
 
+    - name: Start and enable php-fpm
+      ansible.builtin.service:
+        name: php-fpm
+        state: started
+        enabled: true
+
+    # ----------------------------------------------------------------------
+    # nginx
+    # ----------------------------------------------------------------------
+    - name: Install nginx
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+
+    - name: Moodle nginx site
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/moodle.conf
+        mode: "0644"
+        content: |
+          server {
+              listen 80;
+              server_name {{ moodle_domain }} {{ ansible_host }};
+
+              root {{ moodle_dir }};
+              index index.php;
+              client_max_body_size 200M;
+
+              # Hide internal files Moodle should never serve
+              location ~ /\. { deny all; return 404; }
+              location ~ (/vendor/|/node_modules/|composer\.(json|lock)|/fixtures/|/behat/|phpunit\.xml) {
+                  deny all;
+                  return 404;
+              }
+              location ~ (/readme|/README|readme\.txt|/upgrade\.txt|/UPGRADING\.md|/db/install\.xml|environment\.xml) {
+                  deny all;
+                  return 404;
+              }
+
+              # Moodle router: unknown paths go to r.php
+              location / {
+                  try_files $uri $uri/ /r.php;
+              }
+
+              # PHP with slash arguments (e.g. /pluginfile.php/1/...)
+              location ~ [^/]\.php(/|$) {
+                  fastcgi_split_path_info ^(.+\.php)(/.+)$;
+                  fastcgi_index           index.php;
+                  fastcgi_pass            unix:{{ php_fpm_socket }};
+                  include                 fastcgi_params;
+                  fastcgi_param           PATH_INFO       $fastcgi_path_info;
+                  fastcgi_param           SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  fastcgi_read_timeout    300;
+              }
+
+              access_log /var/log/nginx/moodle_access.log;
+              error_log  /var/log/nginx/moodle_error.log;
+          }
+      notify: Reload nginx
+
+    - name: Validate nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Start and enable nginx and crond
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: [nginx, crond]
+
+    - name: Open HTTP in firewalld
+      ansible.builtin.shell: |
+        firewall-cmd --query-service=http --permanent >/dev/null && exit 0
+        firewall-cmd --add-service=http --permanent && firewall-cmd --reload && echo changed
+      args:
+        executable: /bin/bash
+      register: fw_web
+      changed_when: "'changed' in fw_web.stdout"
+      when: ansible_facts['services']['firewalld.service']['state'] | default('') == 'running'
+
+    # ----------------------------------------------------------------------
+    # Moodle 5.0 code
+    # ----------------------------------------------------------------------
     - name: Mark Moodle directory as a safe git directory (repo is owned by apache)
       ansible.builtin.blockinfile:
         path: /etc/gitconfig
@@ -311,7 +346,7 @@
           [safe]
               directory = {{ moodle_dir }}
 
-    - name: Clone Moodle 5.3 into /var/www/html/moodle
+    - name: Clone Moodle 5.0 (MOODLE_500_STABLE) into /var/www/html/moodle
       ansible.builtin.git:
         repo: "{{ moodle_repo }}"
         dest: "{{ moodle_dir }}"
@@ -336,7 +371,7 @@
         group: "{{ web_user }}"
         mode: "0770"
 
-    - name: Write Moodle config.php (project root, outside /public)
+    - name: Write Moodle config.php
       ansible.builtin.copy:
         dest: "{{ moodle_dir }}/config.php"
         owner: "{{ web_user }}"
@@ -350,7 +385,7 @@
 
           $CFG->dbtype    = 'mysqli';
           $CFG->dblibrary = 'native';
-          $CFG->dbhost    = '{{ mysql_private_ip }}';
+          $CFG->dbhost    = '{{ db_host }}';
           $CFG->dbname    = '{{ db_name }}';
           $CFG->dbuser    = '{{ db_user }}';
           $CFG->dbpass    = '{{ db_password }}';
@@ -367,13 +402,15 @@
           $CFG->admin     = 'admin';
           $CFG->directorypermissions = 02777;
 
-          // httpd FallbackResource /r.php is configured, so clean router URLs work.
+          // nginx sends unknown paths to /r.php, so clean router URLs work.
           $CFG->routerconfigured = true;
 
           require_once(__DIR__ . '/lib/setup.php');
 
-    # --- SELinux (RHEL 9 enforces it by default) -----------------------------
-    - name: SELinux - let httpd/php-fpm write to moodledata
+    # ----------------------------------------------------------------------
+    # SELinux (enforcing by default on RHEL 9)
+    # ----------------------------------------------------------------------
+    - name: SELinux - let php-fpm write to moodledata
       ansible.builtin.shell: |
         set -o pipefail
         semanage fcontext -l | grep -q '^{{ moodle_data }}(/.\*)?' && exit 0
@@ -390,7 +427,7 @@
       changed_when: se_restore.stdout | length > 0
       when: selinux_on
 
-    - name: SELinux - allow httpd to reach the remote DB and the network
+    - name: SELinux - allow php-fpm to reach MySQL and the network
       ansible.builtin.shell: |
         set -o pipefail
         changed=""
@@ -404,60 +441,11 @@
       changed_when: "'changed' in se_bool.stdout"
       when: selinux_on
 
-    - name: Apache (httpd) virtual host (Moodle 5.1+ serves from /public)
-      ansible.builtin.copy:
-        dest: /etc/httpd/conf.d/moodle.conf
-        mode: "0644"
-        content: |
-          <VirtualHost *:80>
-              ServerName {{ moodle_domain }}
-              ServerAlias {{ web_public_ip }}
-              DocumentRoot {{ moodle_dir }}/public
-
-              <Directory {{ moodle_dir }}/public>
-                  Options -Indexes +FollowSymLinks
-                  AllowOverride All
-                  Require all granted
-                  DirectoryIndex index.php
-                  FallbackResource /r.php
-              </Directory>
-
-              AcceptPathInfo On
-              ErrorLog /var/log/httpd/moodle_error.log
-              CustomLog /var/log/httpd/moodle_access.log combined
-          </VirtualHost>
-      notify: Restart httpd
-
-    - name: Validate httpd config
-      ansible.builtin.command: apachectl configtest
-      changed_when: false
-
-    - name: Start and enable php-fpm, httpd and crond
-      ansible.builtin.service:
-        name: "{{ item }}"
-        state: started
-        enabled: true
-      loop: [php-fpm, httpd, crond]
-
-    - name: Open HTTP in firewalld
-      ansible.builtin.shell: |
-        firewall-cmd --query-service=http --permanent >/dev/null && exit 0
-        firewall-cmd --add-service=http --permanent && firewall-cmd --reload && echo changed
-      args:
-        executable: /bin/bash
-      register: fw_web
-      changed_when: "'changed' in fw_web.stdout"
-      when: firewalld_on
-
-    - name: Apply httpd/PHP changes now
+    # ----------------------------------------------------------------------
+    # Install + cron + smoke test
+    # ----------------------------------------------------------------------
+    - name: Apply PHP and nginx changes now
       ansible.builtin.meta: flush_handlers
-
-    - name: Check the DB server is reachable on its private IP
-      ansible.builtin.wait_for:
-        host: "{{ mysql_private_ip }}"
-        port: 3306
-        timeout: 30
-        msg: "Cannot reach MySQL at {{ mysql_private_ip }}:3306 - check the DB Security Group allows 3306 from the web server"
 
     - name: Check whether Moodle is already installed
       ansible.builtin.command: runuser -u {{ web_user }} -- php {{ moodle_dir }}/admin/cli/cfg.php --name=release
@@ -499,12 +487,17 @@
       changed_when: false
 
   handlers:
+    - name: Restart mysqld
+      ansible.builtin.service:
+        name: mysqld
+        state: restarted
+
     - name: Restart php-fpm
       ansible.builtin.service:
         name: php-fpm
         state: restarted
 
-    - name: Restart httpd
+    - name: Reload nginx
       ansible.builtin.service:
-        name: httpd
-        state: restarted
+        name: nginx
+        state: reloaded
