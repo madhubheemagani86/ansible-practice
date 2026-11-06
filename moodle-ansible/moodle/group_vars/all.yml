@@ -1,0 +1,29 @@
+---
+# Shared settings for every host (auto-loaded because it sits next to inventory.ini)
+
+# Site
+moodle_url: "http://dev.moodle.lmsconsultant.shop"
+moodle_domain: "dev.moodle.lmsconsultant.shop"
+web_public_ip: "107.22.85.229"
+
+# Moodle code
+moodle_repo: "https://github.com/moodle/moodle.git"
+moodle_branch: "MOODLE_503_STABLE"
+moodle_dir: "/var/www/html/moodle"
+moodle_data: "/var/moodledata"
+
+# Database
+mysql_private_ip: "172.31.18.233"
+mysql_public_ip: "54.160.140.250"
+db_name: "moodle"
+db_user: "moodleuser"
+db_password: "moodle@123"        # encrypt with ansible-vault for anything beyond dev
+db_allowed_host: "%"             # tighten to the web server's private IP if you know it
+
+# Moodle site install (CLI). Set moodle_auto_install: false to finish in the browser instead.
+moodle_auto_install: true
+moodle_site_fullname: "LMS Consultant Moodle"
+moodle_site_shortname: "lmsdev"
+moodle_admin_user: "admin"
+moodle_admin_pass: "Admin@12345"          # CHANGE THIS
+moodle_admin_email: "admin@lmsconsultant.shop"   # CHANGE THIS
