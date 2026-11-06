@@ -59,7 +59,7 @@
 
     - name: Install base packages
       ansible.builtin.dnf:
-        name: [wget, file, git, unzip, tar, cronie, python3-pip, policycoreutils-python-utils]
+        name: [wget, file, git, unzip, tar, cronie, python3-pip, policycoreutils-python-utils, dnf-plugins-core]
         state: present
 
     - name: Install PyMySQL (needed by the community.mysql modules)
@@ -122,11 +122,52 @@
         name: "/tmp/{{ mysql_repo_rpm }}"
         state: present
 
+    # The current release package enables the MySQL 9.x LTS repo by default,
+    # so pin the 8.4 LTS repo explicitly.
+    - name: List MySQL repos defined by the release package
+      ansible.builtin.shell: |
+        set -o pipefail
+        dnf -q repolist all | awk '/^mysql/{print $1}'
+      args:
+        executable: /bin/bash
+      register: mysql_repos
+      changed_when: false
+
+    - name: Define the MySQL 8.4 LTS repo if the release package does not
+      ansible.builtin.yum_repository:
+        name: mysql-8.4-lts-community
+        description: MySQL 8.4 LTS Community Server
+        baseurl: http://repo.mysql.com/yum/mysql-8.4-community/el/9/$basearch/
+        gpgcheck: true
+        gpgkey: file:///tmp/RPM-GPG-KEY-mysql-2023
+        enabled: true
+      when: "'mysql-8.4-lts-community' not in mysql_repos.stdout_lines"
+
+    - name: Enable MySQL 8.4 LTS repos, disable 9.x / innovation repos
+      ansible.builtin.shell: |
+        set -o pipefail
+        before=$(dnf -q repolist enabled | awk '/^mysql/{print $1}' | sort)
+        for r in $(dnf -q repolist all | awk '/^mysql/{print $1}'); do
+          case "$r" in
+            mysql-8.4-lts-community|mysql-tools-8.4-lts-community|mysql-connectors-community)
+              dnf config-manager --set-enabled "$r" ;;
+            mysql-*-community|mysql-tools-*-community|mysql-innovation-*|mysql-tools-innovation-*|mysql-cluster-*)
+              dnf config-manager --set-disabled "$r" ;;
+          esac
+        done
+        after=$(dnf -q repolist enabled | awk '/^mysql/{print $1}' | sort)
+        echo "$after"
+        [ "$before" = "$after" ] || echo changed
+      args:
+        executable: /bin/bash
+      register: mysql_repo_pin
+      changed_when: "'changed' in mysql_repo_pin.stdout_lines"
+
     - name: Check which MySQL server version dnf will install
-      ansible.builtin.command: dnf -q info --available mysql-community-server
+      ansible.builtin.command: dnf -q --refresh info --available mysql-community-server
       register: mysql_available
       changed_when: false
-      failed_when: "'8.4.' not in mysql_available.stdout"
+      failed_when: "'Version      : 8.4.' not in mysql_available.stdout"
 
     - name: Install MySQL server and client 8.4
       ansible.builtin.dnf:
